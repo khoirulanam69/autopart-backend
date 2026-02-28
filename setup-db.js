@@ -18,9 +18,11 @@ async function setup() {
     await client.query(`
       CREATE TABLE IF NOT EXISTS users (
         id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        name TEXT NOT NULL DEFAULT '',
         email VARCHAR(255) UNIQUE NOT NULL,
-        password_hash VARCHAR(255) NOT NULL,
-        created_at TIMESTAMPTZ DEFAULT NOW(),
+        password TEXT NOT NULL,
+        role TEXT NOT NULL DEFAULT 'admin',
+        created_at TIMESTAMPTZ DEFAULT (NOW() AT TIME ZONE 'Asia/Jakarta'),
         updated_at TIMESTAMPTZ DEFAULT NOW()
       );
     `);

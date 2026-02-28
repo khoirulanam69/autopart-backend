@@ -69,23 +69,26 @@ app.post('/auth/login', async (req, res) => {
     if (rows.length === 0) return res.status(401).json({ message: 'Invalid login credentials' });
 
     const user = rows[0];
-    const valid = await bcrypt.compare(password, user.password_hash);
+    const valid = await bcrypt.compare(password, user.password);
     if (!valid) return res.status(401).json({ message: 'Invalid login credentials' });
 
-    const token = jwt.sign({ id: user.id, email: user.email }, JWT_SECRET, { expiresIn: '30d' });
-    res.json({ token, user: { id: user.id, email: user.email } });
+    const token = jwt.sign({ id: user.id, email: user.email, name: user.name, role: user.role }, JWT_SECRET, { expiresIn: '30d' });
+    res.json({ token, user: { id: user.id, name: user.name, email: user.email, role: user.role } });
   } catch (err) {
     res.status(500).json({ message: err.message });
   }
 });
 
-app.post('/auth/register', async (req, res) => {
+app.post('/auth/register', auth, async (req, res) => {
   try {
-    const { email, password } = req.body;
+    // Only admin can register new users
+    if (req.user.role !== 'admin') return res.status(403).json({ message: 'Hanya admin yang bisa mendaftarkan user baru' });
+
+    const { name, email, password, role = 'admin' } = req.body;
     const hash = await bcrypt.hash(password, 10);
     const { rows } = await pool.query(
-      'INSERT INTO users (email, password_hash) VALUES ($1, $2) RETURNING id, email',
-      [email, hash]
+      `INSERT INTO users (name, email, password, role, created_at) VALUES ($1, $2, $3, $4, NOW() AT TIME ZONE 'Asia/Jakarta') RETURNING id, name, email, role`,
+      [name || '', email, hash, role]
     );
     res.json({ user: rows[0] });
   } catch (err) {
@@ -94,8 +97,24 @@ app.post('/auth/register', async (req, res) => {
   }
 });
 
+// Role-based middleware
+function requireRole(...roles) {
+  return (req, res, next) => {
+    if (!roles.includes(req.user.role)) {
+      return res.status(403).json({ message: 'Akses ditolak' });
+    }
+    next();
+  };
+}
+
 app.get('/auth/me', auth, async (req, res) => {
-  res.json({ user: { id: req.user.id, email: req.user.email } });
+  try {
+    const { rows } = await pool.query('SELECT id, name, email, role FROM users WHERE id = $1', [req.user.id]);
+    if (rows.length === 0) return res.status(404).json({ message: 'User not found' });
+    res.json({ user: rows[0] });
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
 });
 
 // ============ PRODUCTS ROUTES ============
