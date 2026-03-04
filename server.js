@@ -308,28 +308,35 @@ app.post('/products/import', auth, async (req, res) => {
         }
       }
 
+      // Resolve image_url: only update if provided (not undefined/empty)
+      const imageUrl = row.image_url && String(row.image_url).trim() !== '' ? String(row.image_url).trim() : null;
+
       try {
         if (row.id) {
           // Update existing product
-          const { rows: check } = await client.query('SELECT id FROM products WHERE id = $1', [row.id]);
+          const { rows: check } = await client.query('SELECT id, image_url FROM products WHERE id = $1', [row.id]);
           if (check.length === 0) {
             result.failed++;
             result.errors.push({ row: rowNum, field: 'ID', message: `Produk dengan ID ${row.id} tidak ditemukan` });
             continue;
           }
+          // Only overwrite image_url if a new value is provided
+          const finalImageUrl = imageUrl !== null ? imageUrl : check[0].image_url;
           await client.query(
-            `UPDATE products SET name=$1, category=$2, price=$3, purchase_price=$4, stock=$5, supplier=$6, barcode=$7, updated_at=NOW()
-             WHERE id=$8`,
-            [String(row.name).trim(), String(row.category).toLowerCase().trim(), Number(row.price), Number(row.purchase_price), stock, row.supplier || null, barcode, row.id]
+            `UPDATE products SET name=$1, category=$2, price=$3, purchase_price=$4, stock=$5, supplier=$6, barcode=$7, image_url=$8, updated_at=NOW()
+             WHERE id=$9`,
+            [String(row.name).trim(), String(row.category).toLowerCase().trim(), Number(row.price), Number(row.purchase_price), stock, row.supplier || null, barcode, finalImageUrl, row.id]
           );
+          console.log(`[Import] Updated product ${row.id}, image_url: ${finalImageUrl}`);
           result.updated++;
         } else {
-          // Insert new product using ON CONFLICT for barcode uniqueness
+          // Insert new product
           await client.query(
-            `INSERT INTO products (name, category, price, purchase_price, stock, supplier, barcode, created_by)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
-            [String(row.name).trim(), String(row.category).toLowerCase().trim(), Number(row.price), Number(row.purchase_price), stock, row.supplier || null, barcode, req.user.id]
+            `INSERT INTO products (name, category, price, purchase_price, stock, supplier, barcode, image_url, created_by)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+            [String(row.name).trim(), String(row.category).toLowerCase().trim(), Number(row.price), Number(row.purchase_price), stock, row.supplier || null, barcode, imageUrl, req.user.id]
           );
+          console.log(`[Import] Inserted new product "${row.name}", image_url: ${imageUrl}`);
           result.success++;
         }
       } catch (dbErr) {
