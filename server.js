@@ -69,23 +69,26 @@ app.post('/auth/login', async (req, res) => {
     if (rows.length === 0) return res.status(401).json({ message: 'Invalid login credentials' });
 
     const user = rows[0];
-    const valid = await bcrypt.compare(password, user.password_hash);
+    const valid = await bcrypt.compare(password, user.password);
     if (!valid) return res.status(401).json({ message: 'Invalid login credentials' });
 
-    const token = jwt.sign({ id: user.id, email: user.email }, JWT_SECRET, { expiresIn: '30d' });
-    res.json({ token, user: { id: user.id, email: user.email } });
+    const token = jwt.sign({ id: user.id, email: user.email, name: user.name, role: user.role }, JWT_SECRET, { expiresIn: '30d' });
+    res.json({ token, user: { id: user.id, name: user.name, email: user.email, role: user.role } });
   } catch (err) {
     res.status(500).json({ message: err.message });
   }
 });
 
-app.post('/auth/register', async (req, res) => {
+app.post('/auth/register', auth, async (req, res) => {
   try {
-    const { email, password } = req.body;
+    // Only admin can register new users
+    if (req.user.role !== 'admin') return res.status(403).json({ message: 'Hanya admin yang bisa mendaftarkan user baru' });
+
+    const { name, email, password, role = 'admin' } = req.body;
     const hash = await bcrypt.hash(password, 10);
     const { rows } = await pool.query(
-      'INSERT INTO users (email, password_hash) VALUES ($1, $2) RETURNING id, email',
-      [email, hash]
+      `INSERT INTO users (name, email, password, role, created_at) VALUES ($1, $2, $3, $4, NOW() AT TIME ZONE 'Asia/Jakarta') RETURNING id, name, email, role`,
+      [name || '', email, hash, role]
     );
     res.json({ user: rows[0] });
   } catch (err) {
@@ -94,8 +97,24 @@ app.post('/auth/register', async (req, res) => {
   }
 });
 
+// Role-based middleware
+function requireRole(...roles) {
+  return (req, res, next) => {
+    if (!roles.includes(req.user.role)) {
+      return res.status(403).json({ message: 'Akses ditolak' });
+    }
+    next();
+  };
+}
+
 app.get('/auth/me', auth, async (req, res) => {
-  res.json({ user: { id: req.user.id, email: req.user.email } });
+  try {
+    const { rows } = await pool.query('SELECT id, name, email, role FROM users WHERE id = $1', [req.user.id]);
+    if (rows.length === 0) return res.status(404).json({ message: 'User not found' });
+    res.json({ user: rows[0] });
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
 });
 
 // ============ PRODUCTS ROUTES ============
@@ -235,6 +254,104 @@ app.post('/products/:id/image', auth, upload.single('image'), async (req, res) =
     res.json({ url });
   } catch (err) {
     res.status(500).json({ message: err.message });
+  }
+});
+
+// ============ PRODUCTS BULK IMPORT ============
+
+app.post('/products/import', auth, async (req, res) => {
+  const client = await pool.connect();
+  try {
+    const { products: importData } = req.body;
+    if (!Array.isArray(importData) || importData.length === 0) {
+      return res.status(400).json({ message: 'Data produk kosong atau format tidak valid' });
+    }
+
+    const VALID_CATEGORIES = ['sparepart', 'oli', 'ban', 'aki', 'aksesoris', 'tools', 'lainnya'];
+    const result = { success: 0, updated: 0, failed: 0, errors: [] };
+
+    await client.query('BEGIN');
+
+    for (let i = 0; i < importData.length; i++) {
+      const row = importData[i];
+      const rowNum = row._rowNum || (i + 2);
+      const errors = [];
+
+      // Validate required fields
+      if (!row.name || String(row.name).trim() === '') errors.push({ row: rowNum, field: 'Nama Produk', message: 'Nama produk wajib diisi' });
+      if (!row.category || !VALID_CATEGORIES.includes(String(row.category).toLowerCase().trim())) errors.push({ row: rowNum, field: 'Kategori', message: `Kategori tidak valid. Pilihan: ${VALID_CATEGORIES.join(', ')}` });
+      if (isNaN(Number(row.price)) || Number(row.price) < 0) errors.push({ row: rowNum, field: 'Harga Jual', message: 'Harga jual harus berupa angka positif' });
+      if (isNaN(Number(row.purchase_price)) || Number(row.purchase_price) < 0) errors.push({ row: rowNum, field: 'Harga Beli', message: 'Harga beli harus berupa angka positif' });
+      const stock = row.stock !== undefined && row.stock !== '' ? Number(row.stock) : 0;
+      if (isNaN(stock) || stock < 0) errors.push({ row: rowNum, field: 'Stok', message: 'Stok harus berupa angka positif' });
+
+      if (errors.length > 0) {
+        result.failed++;
+        result.errors.push(...errors);
+        continue;
+      }
+
+      // Check duplicate barcode
+      const barcode = row.barcode ? String(row.barcode).trim() : null;
+      if (barcode) {
+        let barcodeQuery = 'SELECT id FROM products WHERE barcode = $1';
+        const barcodeParams = [barcode];
+        if (row.id) {
+          barcodeQuery += ' AND id != $2';
+          barcodeParams.push(row.id);
+        }
+        const { rows: existing } = await client.query(barcodeQuery, barcodeParams);
+        if (existing.length > 0) {
+          result.failed++;
+          result.errors.push({ row: rowNum, field: 'Barcode', message: `Barcode sudah digunakan produk lain: ${barcode}` });
+          continue;
+        }
+      }
+
+      try {
+        if (row.id) {
+          // Update existing product
+          const { rows: check } = await client.query('SELECT id FROM products WHERE id = $1', [row.id]);
+          if (check.length === 0) {
+            result.failed++;
+            result.errors.push({ row: rowNum, field: 'ID', message: `Produk dengan ID ${row.id} tidak ditemukan` });
+            continue;
+          }
+          await client.query(
+            `UPDATE products SET name=$1, category=$2, price=$3, purchase_price=$4, stock=$5, supplier=$6, barcode=$7, updated_at=NOW()
+             WHERE id=$8`,
+            [String(row.name).trim(), String(row.category).toLowerCase().trim(), Number(row.price), Number(row.purchase_price), stock, row.supplier || null, barcode, row.id]
+          );
+          result.updated++;
+        } else {
+          // Insert new product using ON CONFLICT for barcode uniqueness
+          await client.query(
+            `INSERT INTO products (name, category, price, purchase_price, stock, supplier, barcode, created_by)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+            [String(row.name).trim(), String(row.category).toLowerCase().trim(), Number(row.price), Number(row.purchase_price), stock, row.supplier || null, barcode, req.user.id]
+          );
+          result.success++;
+        }
+      } catch (dbErr) {
+        result.failed++;
+        result.errors.push({ row: rowNum, field: 'Database', message: dbErr.message || 'Gagal menyimpan ke database' });
+      }
+    }
+
+    // If all rows failed, rollback; otherwise commit
+    if (result.success === 0 && result.updated === 0) {
+      await client.query('ROLLBACK');
+    } else {
+      await client.query('COMMIT');
+    }
+
+    res.json(result);
+  } catch (err) {
+    await client.query('ROLLBACK');
+    console.error('Import error:', err);
+    res.status(500).json({ message: err.message, success: 0, updated: 0, failed: 1, errors: [{ row: 0, field: 'Server', message: err.message }] });
+  } finally {
+    client.release();
   }
 });
 
