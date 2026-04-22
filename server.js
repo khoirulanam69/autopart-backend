@@ -21,7 +21,7 @@ const CDN_BASE_URL = process.env.CDN_BASE_URL || 'http://localhost:3000/uploads'
 const pool = new Pool({
   host: process.env.DB_HOST || '127.0.0.1',
   port: parseInt(process.env.DB_PORT || '5432'),
-  database: process.env.DB_NAME || 'autopart',
+  database: process.env.DB_NAME || 'interfast',
   user: process.env.DB_USER,
   password: process.env.DB_PASSWORD,
 });
@@ -60,6 +60,16 @@ function auth(req, res, next) {
   }
 }
 
+// Role-based middleware
+function requireRole(...roles) {
+  return (req, res, next) => {
+    if (!req.user || !roles.includes(req.user.role)) {
+      return res.status(403).json({ message: 'Akses ditolak: role tidak memiliki izin' });
+    }
+    next();
+  };
+}
+
 // ============ AUTH ROUTES ============
 
 app.post('/auth/login', async (req, res) => {
@@ -84,11 +94,13 @@ app.post('/auth/register', auth, async (req, res) => {
     // Only admin can register new users
     if (req.user.role !== 'admin') return res.status(403).json({ message: 'Hanya admin yang bisa mendaftarkan user baru' });
 
-    const { name, email, password, role = 'admin' } = req.body;
+    const { name, email, password, role = 'staff' } = req.body;
+    const validRoles = ['admin', 'staff'];
+    const finalRole = validRoles.includes(role) ? role : 'staff';
     const hash = await bcrypt.hash(password, 10);
     const { rows } = await pool.query(
       `INSERT INTO users (name, email, password, role, created_at) VALUES ($1, $2, $3, $4, NOW() AT TIME ZONE 'Asia/Jakarta') RETURNING id, name, email, role`,
-      [name || '', email, hash, role]
+      [name || '', email, hash, finalRole]
     );
     res.json({ user: rows[0] });
   } catch (err) {
@@ -96,16 +108,6 @@ app.post('/auth/register', auth, async (req, res) => {
     res.status(500).json({ message: err.message });
   }
 });
-
-// Role-based middleware
-function requireRole(...roles) {
-  return (req, res, next) => {
-    if (!roles.includes(req.user.role)) {
-      return res.status(403).json({ message: 'Akses ditolak' });
-    }
-    next();
-  };
-}
 
 app.get('/auth/me', auth, async (req, res) => {
   try {
@@ -200,7 +202,7 @@ app.get('/products/check-barcode', auth, async (req, res) => {
   }
 });
 
-app.post('/products', auth, async (req, res) => {
+app.post('/products', auth, requireRole('admin'), async (req, res) => {
   try {
     const { name, category, price, purchase_price, stock, supplier, barcode } = req.body;
     const { rows } = await pool.query(
@@ -214,7 +216,7 @@ app.post('/products', auth, async (req, res) => {
   }
 });
 
-app.put('/products/:id', auth, async (req, res) => {
+app.put('/products/:id', auth, requireRole('admin'), async (req, res) => {
   try {
     const { id } = req.params;
     const fields = req.body;
@@ -237,7 +239,7 @@ app.put('/products/:id', auth, async (req, res) => {
   }
 });
 
-app.delete('/products/:id', auth, async (req, res) => {
+app.delete('/products/:id', auth, requireRole('admin'), async (req, res) => {
   try {
     await pool.query('DELETE FROM products WHERE id = $1', [req.params.id]);
     res.json({ success: true });
@@ -246,7 +248,7 @@ app.delete('/products/:id', auth, async (req, res) => {
   }
 });
 
-app.post('/products/:id/image', auth, upload.single('image'), async (req, res) => {
+app.post('/products/:id/image', auth, requireRole('admin'), upload.single('image'), async (req, res) => {
   try {
     if (!req.file) return res.status(400).json({ message: 'No image provided' });
     const url = `${CDN_BASE_URL}/${req.file.filename}`;
@@ -259,7 +261,7 @@ app.post('/products/:id/image', auth, upload.single('image'), async (req, res) =
 
 // ============ PRODUCTS BULK IMPORT ============
 
-app.post('/products/import', auth, async (req, res) => {
+app.post('/products/import', auth, requireRole('admin'), async (req, res) => {
   const client = await pool.connect();
   try {
     const { products: importData } = req.body;
@@ -529,7 +531,7 @@ app.get('/income-expenses', auth, async (req, res) => {
   }
 });
 
-app.post('/income-expenses', auth, async (req, res) => {
+app.post('/income-expenses', auth, requireRole('admin'), async (req, res) => {
   try {
     const { type, amount, category, description, date } = req.body;
     const { rows } = await pool.query(
@@ -543,7 +545,7 @@ app.post('/income-expenses', auth, async (req, res) => {
   }
 });
 
-app.put('/income-expenses/:id', auth, async (req, res) => {
+app.put('/income-expenses/:id', auth, requireRole('admin'), async (req, res) => {
   try {
     const { id } = req.params;
     const fields = req.body;
@@ -565,7 +567,7 @@ app.put('/income-expenses/:id', auth, async (req, res) => {
   }
 });
 
-app.delete('/income-expenses/:id', auth, async (req, res) => {
+app.delete('/income-expenses/:id', auth, requireRole('admin'), async (req, res) => {
   try {
     await pool.query('DELETE FROM income_expenses WHERE id = $1', [req.params.id]);
     res.json({ success: true });
