@@ -263,7 +263,7 @@ app.get('/products/check-barcode', auth, async (req, res) => {
   }
 });
 
-app.post('/products', auth, requireRole('admin'), async (req, res) => {
+app.post('/products', auth, requireRole('admin', 'staff'), async (req, res) => {
   try {
     const { name, category, price, purchase_price, stock, supplier, barcode } = req.body;
     const { rows } = await pool.query(
@@ -277,7 +277,7 @@ app.post('/products', auth, requireRole('admin'), async (req, res) => {
   }
 });
 
-app.put('/products/:id', auth, requireRole('admin'), async (req, res) => {
+app.put('/products/:id', auth, requireRole('admin', 'staff'), async (req, res) => {
   try {
     const { id } = req.params;
     const fields = req.body;
@@ -309,7 +309,7 @@ app.delete('/products/:id', auth, requireRole('admin'), async (req, res) => {
   }
 });
 
-app.post('/products/:id/image', auth, requireRole('admin'), upload.single('image'), async (req, res) => {
+app.post('/products/:id/image', auth, requireRole('admin', 'staff'), upload.single('image'), async (req, res) => {
   try {
     if (!req.file) return res.status(400).json({ message: 'No image provided' });
     const url = `${CDN_BASE_URL}/${req.file.filename}`;
